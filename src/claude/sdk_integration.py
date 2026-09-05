@@ -4,7 +4,7 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Union
 
 import structlog
 from claude_agent_sdk import (
@@ -180,7 +180,7 @@ class StreamUpdate:
 def _make_can_use_tool_callback(
     security_validator: SecurityValidator,
     working_directory: Path,
-    approved_directory: Path,
+    approved_directory: Union[Path, Sequence[Path]],
 ) -> Any:
     """Create a can_use_tool callback for SDK-level tool permission validation.
 
@@ -351,7 +351,7 @@ class ClaudeSDKManager:
                 options.can_use_tool = _make_can_use_tool_callback(
                     security_validator=self.security_validator,
                     working_directory=working_directory,
-                    approved_directory=self.config.approved_directory,
+                    approved_directory=self.config.all_approved_directories,
                 )
 
             # Resume previous session if we have a session_id

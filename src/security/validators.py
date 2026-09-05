@@ -9,7 +9,7 @@ Features:
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import structlog
 
@@ -132,14 +132,30 @@ class SecurityValidator:
     ]
 
     def __init__(
-        self, approved_directory: Path, disable_security_patterns: bool = False
+        self,
+        approved_directory: Path,
+        disable_security_patterns: bool = False,
+        approved_directories: Optional[Sequence[Path]] = None,
     ):
-        """Initialize validator with approved directory."""
+        """Initialize validator with approved directory (or directories).
+
+        ``approved_directory`` remains the primary root (backward compatible).
+        ``approved_directories`` adds extra roots; a path is approved when it
+        falls under ANY configured root. Every root gets the same
+        resolve-then-boundary-check treatment.
+        """
         self.approved_directory = approved_directory.resolve()
+        roots: List[Path] = [self.approved_directory]
+        for extra in approved_directories or []:
+            resolved = Path(extra).resolve()
+            if resolved not in roots:
+                roots.append(resolved)
+        self.approved_directories: List[Path] = roots
         self.disable_security_patterns = disable_security_patterns
         logger.info(
             "Security validator initialized",
             approved_directory=str(self.approved_directory),
+            approved_directories=[str(r) for r in self.approved_directories],
             disable_security_patterns=self.disable_security_patterns,
         )
 
@@ -186,13 +202,18 @@ class SecurityValidator:
             # Resolve path and check boundaries
             target = target.resolve()
 
-            # Ensure target is within approved directory
-            if not self._is_within_directory(target, self.approved_directory):
+            # Ensure target is within one of the approved directories
+            if not any(
+                self._is_within_directory(target, root)
+                for root in self.approved_directories
+            ):
                 logger.warning(
                     "Path traversal attempt detected",
                     requested_path=user_path,
                     resolved_path=str(target),
-                    approved_directory=str(self.approved_directory),
+                    approved_directories=[
+                        str(r) for r in self.approved_directories
+                    ],
                 )
                 return False, None, "Access denied: path outside approved directory"
 
@@ -380,6 +401,7 @@ class SecurityValidator:
         """Get summary of security validation rules."""
         return {
             "approved_directory": str(self.approved_directory),
+            "approved_directories": [str(r) for r in self.approved_directories],
             "allowed_extensions": sorted(list(self.ALLOWED_EXTENSIONS)),
             "forbidden_filenames": sorted(list(self.FORBIDDEN_FILENAMES)),
             "dangerous_patterns_count": len(self.DANGEROUS_PATTERNS),

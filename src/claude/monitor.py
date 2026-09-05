@@ -2,7 +2,7 @@
 
 import shlex
 from pathlib import Path
-from typing import Optional, Set, Tuple
+from typing import List, Optional, Sequence, Set, Tuple, Union
 
 # Subdirectories under ~/.claude/ that Claude Code uses internally.
 _CLAUDE_INTERNAL_SUBDIRS: Set[str] = {"plans", "todos", "settings.json"}
@@ -61,9 +61,13 @@ _COMMAND_SEPARATORS: Set[str] = {"&&", "||", ";", "|", "&"}
 def check_bash_directory_boundary(
     command: str,
     working_directory: Path,
-    approved_directory: Path,
+    approved_directory: Union[Path, Sequence[Path]],
 ) -> Tuple[bool, Optional[str]]:
-    """Check if a bash command's paths stay within the approved directory."""
+    """Check if a bash command's paths stay within the approved directory.
+
+    ``approved_directory`` may be a single root (backward compatible) or a
+    sequence of roots; a path is allowed when it falls under ANY root.
+    """
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -89,7 +93,11 @@ def check_bash_directory_boundary(
     if current_chain:
         command_chains.append(current_chain)
 
-    resolved_approved = approved_directory.resolve()
+    if isinstance(approved_directory, Path):
+        approved_roots: List[Path] = [approved_directory]
+    else:
+        approved_roots = list(approved_directory)
+    resolved_roots = [root.resolve() for root in approved_roots]
 
     # Check each command in the chain
     for cmd_tokens in command_chains:
@@ -127,11 +135,14 @@ def check_bash_directory_boundary(
                 else:
                     resolved = (working_directory / token).resolve()
 
-                if not _is_within_directory(resolved, resolved_approved):
+                if not any(
+                    _is_within_directory(resolved, root) for root in resolved_roots
+                ):
+                    roots_display = ", ".join(str(r) for r in resolved_roots)
                     return False, (
                         f"Directory boundary violation: '{base_command}' targets "
-                        f"'{token}' which is outside approved directory "
-                        f"'{resolved_approved}'"
+                        f"'{token}' which is outside approved directories "
+                        f"'{roots_display}'"
                     )
             except (ValueError, OSError):
                 # If path resolution fails, the command might be malformed or

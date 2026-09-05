@@ -9,6 +9,7 @@ Features:
 """
 
 import json
+import re
 from pathlib import Path
 from typing import Any, List, Literal, Optional
 
@@ -45,6 +46,13 @@ class Settings(BaseSettings):
 
     # Security
     approved_directory: Path = Field(..., description="Base directory for projects")
+    approved_directories: Optional[List[Path]] = Field(
+        None,
+        description=(
+            "Additional approved root directories (comma- or semicolon-"
+            "separated). A path is approved when it falls under ANY root."
+        ),
+    )
     allowed_users: Optional[List[int]] = Field(
         None, description="Allowed Telegram user IDs"
     )
@@ -373,6 +381,47 @@ class Settings(BaseSettings):
         if not path.is_dir():
             raise ValueError(f"Approved directory is not a directory: {path}")
         return path  # type: ignore[no-any-return]
+
+    @field_validator("approved_directories", mode="before")
+    @classmethod
+    def parse_approved_directories(cls, v: Any) -> Optional[List[Path]]:
+        """Parse and validate the extra approved roots.
+
+        Accepts a comma- or semicolon-separated string. ':' is NOT a
+        separator because it appears in Windows drive paths (C:\\...).
+        Each root gets the same resolve + exists + is_dir treatment as
+        the primary approved_directory.
+        """
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            items: List[Any] = [
+                part.strip() for part in re.split(r"[,;]", v) if part.strip()
+            ]
+        elif isinstance(v, (list, tuple)):
+            items = list(v)
+        else:
+            items = [v]
+
+        roots: List[Path] = []
+        for item in items:
+            path = Path(item).resolve() if not isinstance(item, Path) else item.resolve()
+            if not path.exists():
+                raise ValueError(f"Approved directory does not exist: {path}")
+            if not path.is_dir():
+                raise ValueError(f"Approved directory is not a directory: {path}")
+            if path not in roots:
+                roots.append(path)
+        return roots or None
+
+    @property
+    def all_approved_directories(self) -> List[Path]:
+        """Primary approved_directory plus any extra roots, deduplicated."""
+        roots: List[Path] = [self.approved_directory]
+        for extra in self.approved_directories or []:
+            if extra not in roots:
+                roots.append(extra)
+        return roots
 
     @field_validator("mcp_config_path", mode="before")
     @classmethod
