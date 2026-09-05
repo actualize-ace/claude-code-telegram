@@ -147,11 +147,49 @@ class ClaudeCodeBot:
         """Register handlers via orchestrator (mode-aware)."""
         self.orchestrator.register_handlers(self.app)
 
+    async def _refuse_non_private_chats(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """ACE build: private chats only, enforced before every other handler.
+
+        Runs in the earliest handler group so that nothing else, including
+        the auth middleware's "not authorized" reply, can answer into a group.
+        Any reply into a group is itself the leak, so this refuses silently,
+        logs it, and leaves the chat so the mistake is visible and over.
+        Incident: 2026-09-04, the operator's bot sat in a community supergroup
+        with privacy mode off and answered the owner's own posts there.
+        """
+        from telegram.ext import ApplicationHandlerStop
+
+        if self.settings.allow_group_chats:
+            return
+        chat = update.effective_chat
+        if chat is None or getattr(chat, "type", "private") == "private":
+            return
+        logger.warning(
+            "Refusing non-private chat and leaving it",
+            chat_id=chat.id,
+            chat_type=getattr(chat, "type", None),
+            chat_title=getattr(chat, "title", None),
+        )
+        try:
+            await context.bot.leave_chat(chat.id)
+        except Exception as e:  # leaving is best-effort; refusing is not
+            logger.warning("Could not leave chat", chat_id=chat.id, error=str(e))
+        raise ApplicationHandlerStop
+
     def _add_middleware(self) -> None:
         """Add middleware to application."""
         from .middleware.auth import auth_middleware
         from .middleware.rate_limit import rate_limit_middleware
         from .middleware.security import security_middleware
+
+        # Private-chat guard first, ahead of every middleware group, so no
+        # reply of any kind can be sent into a group before it fires.
+        self.app.add_handler(
+            MessageHandler(filters.ALL, self._refuse_non_private_chats),
+            group=-10,
+        )
 
         # Middleware runs in order of group numbers (lower = earlier)
         # Security middleware first (validate inputs)

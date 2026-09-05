@@ -256,6 +256,21 @@ class Settings(BaseSettings):
         description="Conversational agentic mode (default) vs classic command mode",
     )
 
+    # Private chats only. ACE build default is False: the bot is one member's
+    # private line into their own vault. Upstream has no chat-type guard and
+    # ships with privacy mode off, so a bot added to any group treats every
+    # message there as a prompt and answers IN THE GROUP, including vault-
+    # backed replies to the owner and "not authorized" replies to everyone
+    # else. When False the bot refuses non-private chats before any other
+    # handler runs and leaves the chat, so the mistake is visible and over.
+    allow_group_chats: bool = Field(
+        False,
+        description=(
+            "Respond in groups, supergroups and channels. Off in the ACE build: "
+            "the bot refuses and leaves any non-private chat it is added to."
+        ),
+    )
+
     # Reply quoting. ACE build default is False: with one session per thread
     # the quote adds nothing, and echoing the member's own message back under
     # their name on every reply reads like a ticket system, not a companion.
