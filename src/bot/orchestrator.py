@@ -220,7 +220,17 @@ class MessageOrchestrator:
                 }
             else:
                 # A new thread starts clean; it never inherits another thread.
+                # force_new_session is REQUIRED here, not cosmetic: handing the
+                # facade session_id=None is not enough, because it then calls
+                # _find_resumable_session(user_id, working_directory) and
+                # auto-resumes the most recent session for that user+directory
+                # (claude/facade.py). Every thread shares one user and one
+                # vault directory, so without this flag a brand-new thread
+                # silently resumes whichever thread ran last. force_new is the
+                # only condition that suppresses that lookup. It is one-shot:
+                # the handler clears it after a successful run.
                 bucket = {f: None for f in self._THREAD_SCOPED_FIELDS}
+                bucket["force_new_session"] = True
             buckets[key] = bucket
 
         for f in self._THREAD_SCOPED_FIELDS:
