@@ -529,12 +529,22 @@ class MessageOrchestrator:
     async def get_bot_commands(self) -> list:  # type: ignore[type-arg]
         """Return bot commands appropriate for current mode."""
         if self.settings.agentic_mode:
+            # ACE build: the menu is the member's surface, so it lists the
+            # vault's skills. Anything not registered as a bot command
+            # (everything except start/new/status/restart) passes through to
+            # Claude, where the vault's skill loader handles it. /verbose and
+            # /repo still work; they are just not what a member reaches for.
             commands = [
-                BotCommand("start", "Start the bot"),
-                BotCommand("new", "Start a fresh session"),
-                BotCommand("status", "Show session status"),
-                BotCommand("verbose", "Set output verbosity (0/1/2)"),
-                BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("start", "Begin your day"),
+                BotCommand("brief", "Schedule, priorities, follow-ups"),
+                BotCommand("capture", "Drop a thought into the inbox"),
+                BotCommand("coach", "Coaching conversation"),
+                BotCommand("regulate", "Nervous system check-in"),
+                BotCommand("state", "Update your energy"),
+                BotCommand("close", "Log this thread's work"),
+                BotCommand("eod", "End-of-day closure"),
+                BotCommand("new", "Fresh session in this thread"),
+                BotCommand("status", "Session status"),
                 BotCommand("restart", "Restart the bot"),
             ]
             if self.settings.enable_project_threads:
@@ -566,7 +576,19 @@ class MessageOrchestrator:
     async def agentic_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Brief welcome, no buttons."""
+        """Brief welcome on first contact; afterwards /start belongs to the vault.
+
+        Telegram sends /start on first contact and the bot registers it as its
+        own command, so in the stock bridge the vault's /start skill (the
+        morning protocol) could never be reached. Resolve the conflict by
+        history rather than by renaming: a member with no session history gets
+        the one-time welcome; anyone with prior sessions has /start forwarded
+        to Claude verbatim, where the skill loader handles it.
+        """
+        if self._has_session_history(context):
+            await self.agentic_text(update, context)
+            return
+
         user = update.effective_user
         sync_line = ""
         if (
@@ -609,13 +631,26 @@ class MessageOrchestrator:
 
         safe_name = escape_html(user.first_name)
         await update.message.reply_text(
-            f"Hi {safe_name}! I'm your AI coding assistant.\n"
-            f"Just tell me what you need — I can read, write, and run code.\n\n"
-            f"Working in: {dir_display}\n"
-            f"Commands: /new (reset) · /status"
+            f"Hi {safe_name}. This is ACE.\n\n"
+            f"Every thread here is its own conversation, so start a new thread "
+            f"for each piece of work and reopen it to continue. "
+            f"Send /close in a thread when the work is done.\n\n"
+            f"From here on, /start runs your morning protocol.\n"
+            f"Vault: {dir_display}"
             f"{sync_line}",
             parse_mode="HTML",
         )
+        # The welcome shows exactly once. Persisted with user_data, so it does
+        # not come back after a bot restart.
+        context.user_data["session_started"] = True
+
+    def _has_session_history(self, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """True once the member has ever had a session or seen the welcome."""
+        ud = context.user_data
+        if ud.get("claude_session_id") or ud.get("session_started"):
+            return True
+        buckets = ud.get(self._THREAD_SESSIONS_KEY) or {}
+        return any((b or {}).get("claude_session_id") for b in buckets.values())
 
     async def agentic_new(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

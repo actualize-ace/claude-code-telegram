@@ -256,12 +256,14 @@ class Settings(BaseSettings):
         description="Conversational agentic mode (default) vs classic command mode",
     )
 
-    # Reply quoting
+    # Reply quoting. ACE build default is False: with one session per thread
+    # the quote adds nothing, and echoing the member's own message back under
+    # their name on every reply reads like a ticket system, not a companion.
     reply_quote: bool = Field(
-        True,
+        False,
         description=(
             "Quote the original user message when replying. "
-            "Set to false for cleaner thread-based conversations."
+            "Off by default in the ACE build; set true to restore upstream behaviour."
         ),
     )
 
