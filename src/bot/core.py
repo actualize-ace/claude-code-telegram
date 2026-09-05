@@ -29,6 +29,28 @@ from .orchestrator import MessageOrchestrator
 logger = structlog.get_logger()
 
 
+def build_user_data_persistence(settings: Settings) -> Optional[Any]:
+    """PicklePersistence for user_data only, stored beside the SQLite database.
+
+    Returns None when the database is not SQLite-on-disk, because there is no
+    sensible place for the file; the bot then keeps its in-memory behaviour.
+    """
+    from telegram.ext import PersistenceInput, PicklePersistence
+
+    db_path = settings.database_path
+    if db_path is None:
+        return None
+    data_dir = db_path.parent
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return PicklePersistence(
+        filepath=data_dir / "user_data.pickle",
+        store_data=PersistenceInput(
+            bot_data=False, chat_data=False, user_data=True, callback_data=False
+        ),
+        update_interval=5,
+    )
+
+
 class ClaudeCodeBot:
     """Main bot orchestrator."""
 
@@ -53,6 +75,15 @@ class ClaudeCodeBot:
         builder.token(self.settings.telegram_token_str)
         builder.defaults(Defaults(do_quote=self.settings.reply_quote))
         builder.rate_limiter(AIORateLimiter(max_retries=1))
+
+        # Persist user_data across restarts. Without this the claude_session_id
+        # pointer (and the per-thread session map) lives only in memory, so
+        # every bot restart silently starts a fresh Claude session. user_data
+        # only: bot_data carries injected service objects that must never be
+        # pickled, and chat_data/callback_data are unused.
+        persistence = build_user_data_persistence(self.settings)
+        if persistence is not None:
+            builder.persistence(persistence)
 
         from .update_processor import StopAwareUpdateProcessor
 

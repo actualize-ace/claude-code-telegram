@@ -162,14 +162,79 @@ class MessageOrchestrator:
                 allowed = await self._apply_thread_routing_context(update, context)
                 if not allowed:
                     return
+            else:
+                self._load_thread_session(update, context, message_thread_id)
 
             try:
                 await handler(update, context)
             finally:
                 if should_enforce:
                     self._persist_thread_state(context)
+                else:
+                    self._save_thread_session(context)
 
         return wrapped
+
+    # ─── Per-thread sessions without a project registry ──────────────────
+    # Telegram threads in a private bot chat (Bot API 9.3, "Threaded Mode" in
+    # BotFather) deliver a message_thread_id on every message. Without
+    # ENABLE_PROJECT_THREADS the stock bot discards it, so every thread shares
+    # the one claude_session_id and context bleeds across all of them. These
+    # two hooks key the session pointer (and the one-shot /new flag) by
+    # chat:thread so each thread is its own conversation. No registry, no
+    # topic creation, no rejection. Traffic with no thread id uses bucket 0,
+    # which is exactly the pre-patch behaviour, so bots without Threaded Mode
+    # are unchanged. Bucket 0 adopts a pre-existing legacy pointer on first
+    # load so an upgrade never drops the member's current session.
+
+    _THREAD_SESSIONS_KEY = "thread_sessions"
+    _THREAD_ACTIVE_KEY = "_thread_session_key"
+    _THREAD_SCOPED_FIELDS = ("claude_session_id", "force_new_session")
+
+    @staticmethod
+    def _thread_bucket_key(chat_id: int, message_thread_id: Optional[int]) -> str:
+        return f"{chat_id}:{message_thread_id or 0}"
+
+    def _load_thread_session(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        message_thread_id: Optional[int],
+    ) -> None:
+        """Swap the thread's session pointer into the flat user_data keys."""
+        chat = update.effective_chat
+        if not chat:
+            context.user_data.pop(self._THREAD_ACTIVE_KEY, None)
+            return
+
+        key = self._thread_bucket_key(chat.id, message_thread_id)
+        buckets = context.user_data.setdefault(self._THREAD_SESSIONS_KEY, {})
+        context.user_data[self._THREAD_ACTIVE_KEY] = key
+
+        bucket = buckets.get(key)
+        if bucket is None:
+            if message_thread_id is None:
+                # Legacy migration: the single pre-patch pointer becomes bucket 0.
+                bucket = {
+                    f: context.user_data.get(f) for f in self._THREAD_SCOPED_FIELDS
+                }
+            else:
+                # A new thread starts clean; it never inherits another thread.
+                bucket = {f: None for f in self._THREAD_SCOPED_FIELDS}
+            buckets[key] = bucket
+
+        for f in self._THREAD_SCOPED_FIELDS:
+            context.user_data[f] = bucket.get(f)
+
+    def _save_thread_session(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Persist the flat keys back into the active thread's bucket."""
+        key = context.user_data.get(self._THREAD_ACTIVE_KEY)
+        if not key:
+            return
+        buckets = context.user_data.setdefault(self._THREAD_SESSIONS_KEY, {})
+        buckets[key] = {
+            f: context.user_data.get(f) for f in self._THREAD_SCOPED_FIELDS
+        }
 
     async def _apply_thread_routing_context(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
