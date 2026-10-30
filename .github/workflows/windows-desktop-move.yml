@@ -1,0 +1,95 @@
+name: Windows desktop move model
+
+# Models the office-desktop install from Marc's 2026-10-29 runsheet on a clean Windows machine.
+# Test branch only; never merged into ace.
+on:
+  push:
+    branches: [test/windows-desktop-move]
+  workflow_dispatch:
+
+jobs:
+  model:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prompt C step 2, uv with the official installer
+        run: |
+          powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+          $bin = Join-Path $env:USERPROFILE ".local\bin"
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $bin "uv.exe") --version
+
+      - name: Tony's October install, upstream v1.6.0 with pip
+        continue-on-error: true
+        run: |
+          python -m pip install --quiet "claude-code-telegram @ git+https://github.com/RichardAtCT/claude-code-telegram@v1.6.0"
+          Get-Command claude-telegram-bot -All | Format-Table -AutoSize Source
+
+      - name: Prompt C step 2, install the ACE build with uv
+        run: |
+          uv tool install "claude-code-telegram @ git+https://github.com/actualize-ace/claude-code-telegram@ace-v1"
+          uv tool list
+          "--- every claude-telegram-bot on PATH, first one wins:"
+          Get-Command claude-telegram-bot -All | Format-Table -AutoSize Source
+          $exe = Join-Path $env:USERPROFILE ".local\bin\claude-telegram-bot.exe"
+          "uv exe exists: $(Test-Path $exe) at $exe"
+          $py = Join-Path $env:APPDATA "uv\tools\claude-code-telegram\Scripts\python.exe"
+          & $py -c "import claude_agent_sdk; print('claude-agent-sdk', claude_agent_sdk.__version__)"
+
+      - name: Prompt C step 3, photo fix and compile
+        run: |
+          $py = Join-Path $env:APPDATA "uv\tools\claude-code-telegram\Scripts\python.exe"
+          $code = @'
+          import importlib.util, py_compile, re
+          path = importlib.util.find_spec("src.claude.sdk_integration").origin
+          text = open(path, encoding="utf-8").read()
+          anchor = "options = ClaudeAgentOptions("
+          assert text.count(anchor) == 1, f"anchor count {text.count(anchor)}"
+          text = text.replace(anchor, anchor + "\n                # Lets full-size phone photos through.\n                max_buffer_size=32 * 1024 * 1024,", 1)
+          open(path, "w", encoding="utf-8").write(text)
+          py_compile.compile(path, doraise=True)
+          print("PASS photo fix inserted and compiles:", path)
+          '@
+          $code | Out-File -FilePath patch.py -Encoding utf8
+          & $py patch.py
+
+      - name: Prompt C step 4, the desktop .env through the bot's own loader
+        run: |
+          $py = Join-Path $env:APPDATA "uv\tools\claude-code-telegram\Scripts\python.exe"
+          $botdir = Join-Path $env:USERPROFILE ".claude-telegram-bot"
+          New-Item -ItemType Directory -Force -Path $botdir | Out-Null
+          $vault = Join-Path $env:USERPROFILE "Dropbox\ACE\marc OS-ace"
+          Set-Location $botdir
+          & $py "$env:GITHUB_WORKSPACE\scripts\desktop_move_model.py" $vault $env:USERPROFILE
+
+      - name: Prompt E step 1, start the uv exe from its working folder (fake token)
+        run: |
+          $botdir = Join-Path $env:USERPROFILE ".claude-telegram-bot"
+          Set-Location $botdir
+          $exe = Join-Path $env:USERPROFILE ".local\bin\claude-telegram-bot.exe"
+          $p = Start-Process -FilePath $exe -WorkingDirectory $botdir -PassThru -NoNewWindow -RedirectStandardOutput bot.log -RedirectStandardError bot.err
+          Start-Sleep -Seconds 45
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; "bot still running after 45 s (stopped)" } else { "bot exited with code $($p.ExitCode)" }
+          "--- stdout (last 40)"; Get-Content bot.log -Tail 40
+          "--- stderr (last 40)"; Get-Content bot.err -Tail 40
+
+      - name: Prompt E step 3, one-instance watchdog logic
+        run: |
+          $exe = Join-Path $env:USERPROFILE ".local\bin\claude-telegram-bot.exe"
+          $botdir = Join-Path $env:USERPROFILE ".claude-telegram-bot"
+          function Watch { if (-not (Get-Process claude-telegram-bot -ErrorAction SilentlyContinue)) { Start-Process -FilePath $exe -WorkingDirectory $botdir -WindowStyle Hidden; "started" } else { "already running, left alone" } }
+          Watch; Start-Sleep 5; Watch; Watch
+          "running copies: $((Get-Process claude-telegram-bot -ErrorAction SilentlyContinue).Count)"
+          Get-Process claude-telegram-bot -ErrorAction SilentlyContinue | Stop-Process -Force
+          "Startup folder: $([Environment]::GetFolderPath('Startup'))"
+
+      - name: Step B, Claude Code with the official Windows installer
+        run: |
+          irm https://claude.ai/install.ps1 | iex
+          $env:Path = (Join-Path $env:USERPROFILE ".local\bin") + ";" + $env:Path
+          claude --version
