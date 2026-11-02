@@ -335,6 +335,8 @@ class ClaudeSDKManager:
                 },
                 system_prompt=base_prompt,
                 setting_sources=["project"],
+                # Lets full-size phone photos through the SDK's message buffer.
+                max_buffer_size=32 * 1024 * 1024,
                 stderr=_stderr_callback,
             )
 

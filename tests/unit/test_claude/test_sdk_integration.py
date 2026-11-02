@@ -494,6 +494,27 @@ class TestClaudeSandboxSettings:
     def sdk_manager(self, config):
         return ClaudeSDKManager(config)
 
+    async def test_photo_buffer_raised_for_full_size_photos(
+        self, sdk_manager, tmp_path
+    ):
+        """Full-size phone photos overflow the SDK's default 1 MB buffer."""
+        captured_options = []
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("Test response"),
+            _make_result_message(total_cost_usd=0.01),
+            capture_options=captured_options,
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=tmp_path,
+            )
+
+        assert captured_options[0].max_buffer_size == 32 * 1024 * 1024
+
     async def test_sandbox_settings_passed_to_options(self, sdk_manager, tmp_path):
         """Test that sandbox settings are set on ClaudeAgentOptions."""
         captured_options = []

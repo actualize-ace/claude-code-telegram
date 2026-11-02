@@ -280,6 +280,9 @@ class ClaudeCodeBot:
         try:
             self.is_running = True
 
+            # drop_pending_updates=False in both modes: messages sent while the
+            # bot was down are answered on restart, never dropped. They were
+            # sent from a phone, with no other sign they were lost.
             if self.settings.webhook_url:
                 # Webhook mode
                 await self.app.run_webhook(
@@ -287,7 +290,7 @@ class ClaudeCodeBot:
                     port=self.settings.webhook_port,
                     url_path=self.settings.webhook_path,
                     webhook_url=self.settings.webhook_url,
-                    drop_pending_updates=True,
+                    drop_pending_updates=False,
                     allowed_updates=Update.ALL_TYPES,
                 )
             else:
@@ -296,7 +299,7 @@ class ClaudeCodeBot:
                 await self.app.start()
                 await self.app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
+                    drop_pending_updates=False,
                 )
 
                 # Keep running until manually stopped
