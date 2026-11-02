@@ -51,7 +51,9 @@ class FileHandler:
         self.config = config
         self.security = security
         self.temp_dir = Path("/tmp/claude_bot_files")
-        self.temp_dir.mkdir(exist_ok=True)
+        # parents=True: on Windows this is C:\tmp\claude_bot_files, and
+        # C:\tmp does not exist on a fresh machine.
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
         # Supported code extensions
         self.code_extensions = {

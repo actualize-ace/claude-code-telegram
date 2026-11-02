@@ -17,6 +17,7 @@ from claude_agent_sdk import (
     CLIConnectionError,
     CLIJSONDecodeError,
     CLINotFoundError,
+    HookMatcher,
     Message,
     PermissionResultAllow,
     PermissionResultDeny,
@@ -179,43 +180,41 @@ class StreamUpdate:
         return None
 
 
-def _make_can_use_tool_callback(
+_FILE_TOOLS = {"Write", "Edit", "Read", "create_file", "edit_file", "read_file"}
+_BASH_TOOLS = {"Bash", "bash", "shell"}
+
+
+def _make_boundary_check(
     security_validator: SecurityValidator,
     working_directory: Path,
     approved_directory: Union[Path, Sequence[Path]],
-) -> Any:
-    """Create a can_use_tool callback for SDK-level tool permission validation.
+) -> Callable[[str, Dict[str, Any]], Optional[str]]:
+    """Return a check that names why a tool call leaves the approved folders.
 
-    The callback validates file path boundaries and bash directory boundaries
-    *before* the SDK executes the tool, providing preventive security enforcement.
+    The check returns None when the call may run. Both the can_use_tool
+    callback and the PreToolUse hook use it, so the two never disagree.
     """
-    _FILE_TOOLS = {"Write", "Edit", "Read", "create_file", "edit_file", "read_file"}
-    _BASH_TOOLS = {"Bash", "bash", "shell"}
 
-    async def can_use_tool(
-        tool_name: str,
-        tool_input: Dict[str, Any],
-        context: ToolPermissionContext,
-    ) -> Any:
+    def boundary_error(tool_name: str, tool_input: Dict[str, Any]) -> Optional[str]:
         # File path validation
         if tool_name in _FILE_TOOLS:
             file_path = tool_input.get("file_path") or tool_input.get("path")
             if file_path:
                 # Allow Claude Code internal paths (~/.claude/plans/, etc.)
                 if _is_claude_internal_path(file_path):
-                    return PermissionResultAllow()
+                    return None
 
                 valid, _resolved, error = security_validator.validate_path(
                     file_path, working_directory
                 )
                 if not valid:
                     logger.warning(
-                        "can_use_tool denied file operation",
+                        "denied file operation",
                         tool_name=tool_name,
                         file_path=file_path,
                         error=error,
                     )
-                    return PermissionResultDeny(message=error or "Invalid file path")
+                    return error or "Invalid file path"
 
         # Bash directory boundary validation
         if tool_name in _BASH_TOOLS:
@@ -226,18 +225,79 @@ def _make_can_use_tool_callback(
                 )
                 if not valid:
                     logger.warning(
-                        "can_use_tool denied bash command",
+                        "denied bash command",
                         tool_name=tool_name,
                         command=command,
                         error=error,
                     )
-                    return PermissionResultDeny(
-                        message=error or "Bash directory boundary violation"
-                    )
+                    return error or "Bash directory boundary violation"
 
+        return None
+
+    return boundary_error
+
+
+def _make_can_use_tool_callback(
+    security_validator: SecurityValidator,
+    working_directory: Path,
+    approved_directory: Union[Path, Sequence[Path]],
+) -> Any:
+    """Create a can_use_tool callback for SDK-level tool permission validation.
+
+    The callback validates file path boundaries and bash directory boundaries
+    *before* the SDK executes the tool, providing preventive security enforcement.
+    The SDK never calls it for tools on the allowed list; the PreToolUse hook
+    from _make_boundary_hook covers those.
+    """
+    boundary_error = _make_boundary_check(
+        security_validator, working_directory, approved_directory
+    )
+
+    async def can_use_tool(
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        context: ToolPermissionContext,
+    ) -> Any:
+        error = boundary_error(tool_name, tool_input)
+        if error:
+            return PermissionResultDeny(message=error)
         return PermissionResultAllow()
 
     return can_use_tool
+
+
+def _make_boundary_hook(
+    security_validator: SecurityValidator,
+    working_directory: Path,
+    approved_directory: Union[Path, Sequence[Path]],
+) -> Any:
+    """Create a PreToolUse hook that runs the boundary check on every tool call.
+
+    The SDK skips can_use_tool for tools on CLAUDE_ALLOWED_TOOLS, so a Write
+    on the allowed list reached C:\\tmp unchecked (Marc Cooper's laptop,
+    2026-10-29). Hooks run for every tool call, allowed list or not.
+    """
+    boundary_error = _make_boundary_check(
+        security_validator, working_directory, approved_directory
+    )
+
+    async def pre_tool_use(
+        input_data: Any, tool_use_id: Optional[str], context: Any
+    ) -> Dict[str, Any]:
+        error = boundary_error(
+            input_data.get("tool_name", ""), input_data.get("tool_input") or {}
+        )
+        if error:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": error,
+                }
+            }
+        return {}
+
+    return pre_tool_use
 
 
 def _write_system_prompt_file(prompt: str) -> Path:
@@ -378,6 +438,22 @@ class ClaudeSDKManager:
                     working_directory=working_directory,
                     approved_directory=self.config.all_approved_directories,
                 )
+                options.hooks = {
+                    "PreToolUse": [
+                        HookMatcher(
+                            matcher=None,
+                            hooks=[
+                                _make_boundary_hook(
+                                    security_validator=self.security_validator,
+                                    working_directory=working_directory,
+                                    approved_directory=(
+                                        self.config.all_approved_directories
+                                    ),
+                                )
+                            ],
+                        )
+                    ]
+                }
 
             # Resume previous session if we have a session_id
             if session_id and continue_session:

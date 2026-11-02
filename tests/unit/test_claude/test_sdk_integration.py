@@ -20,6 +20,7 @@ from src.claude.sdk_integration import (
     ClaudeResponse,
     ClaudeSDKManager,
     StreamUpdate,
+    _make_boundary_hook,
     _make_can_use_tool_callback,
 )
 from src.config.settings import Settings
@@ -1014,6 +1015,8 @@ class TestCanUseToolCallback:
 
         assert len(captured_options) == 1
         assert captured_options[0].can_use_tool is not None
+        hooks = captured_options[0].hooks["PreToolUse"]
+        assert len(hooks) == 1 and hooks[0].matcher is None
 
     async def test_no_callback_without_security_validator(self, tmp_path):
         """Verify can_use_tool is None when no SecurityValidator is provided."""
@@ -1250,3 +1253,62 @@ class TestClaudeMdLoading:
 
         opts = captured[0]
         assert opts.setting_sources == ["project"]
+
+
+class TestBoundaryHook:
+    """The PreToolUse hook runs the boundary check the allowed list skips."""
+
+    @pytest.fixture
+    def security_validator(self):
+        validator = MagicMock()
+        validator.validate_path = MagicMock(return_value=(True, Path("/ok"), None))
+        return validator
+
+    @pytest.fixture
+    def hook(self, security_validator, tmp_path):
+        return _make_boundary_hook(
+            security_validator=security_validator,
+            working_directory=tmp_path / "project",
+            approved_directory=tmp_path,
+        )
+
+    async def test_denies_write_outside(self, hook, security_validator):
+        security_validator.validate_path.return_value = (
+            False,
+            None,
+            "Path outside approved directory",
+        )
+        out = await hook(
+            {"tool_name": "Write", "tool_input": {"file_path": "C:/tmp/x.txt"}},
+            "tool-1",
+            None,
+        )
+        decision = out["hookSpecificOutput"]
+        assert decision["hookEventName"] == "PreToolUse"
+        assert decision["permissionDecision"] == "deny"
+        assert "outside approved" in decision["permissionDecisionReason"]
+
+    async def test_denies_bash_outside(self, hook):
+        out = await hook(
+            {"tool_name": "Bash", "tool_input": {"command": "mkdir -p /tmp/evil"}},
+            "tool-2",
+            None,
+        )
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    async def test_leaves_allowed_calls_to_normal_flow(self, hook, tmp_path):
+        """An allowed call returns no decision, so it never auto-approves."""
+        assert (
+            await hook(
+                {"tool_name": "Write", "tool_input": {"file_path": "notes.md"}},
+                "tool-3",
+                None,
+            )
+            == {}
+        )
+        assert (
+            await hook(
+                {"tool_name": "Grep", "tool_input": {"pattern": "x"}}, "tool-4", None
+            )
+            == {}
+        )
