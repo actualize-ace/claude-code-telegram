@@ -1,0 +1,57 @@
+name: ace-v1.3 on Windows
+
+# Test branch only; never merged into ace. Installs ace-v1.2 and this commit the
+# way Step H does, then starts the real CLI with a CLAUDE.md past 32,767 characters.
+on:
+  push:
+    branches: [test/ace-v1.3-windows]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uv and Claude Code, official installers
+        run: |
+          powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+          irm https://claude.ai/install.ps1 | iex
+          $bin = Join-Path $env:USERPROFILE ".local\bin"
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $bin "uv.exe") --version
+          & (Join-Path $bin "claude.exe") --version
+
+      - name: Unit tests for the Claude integration, on Windows
+        run: |
+          uv venv -p 3.12 .venv-test
+          $env:VIRTUAL_ENV = (Resolve-Path .venv-test).Path
+          uv pip install -e . "pytest>=8.4,<9" "pytest-asyncio>=1.0,<2" "pytest-mock>=3.14" "pytest-cov>=6.1,<7"
+          .venv-test\Scripts\python.exe -m pytest tests/unit/test_claude -q -p no:cacheprovider --no-cov
+
+      - name: ace-v1.2, the Step H install, then the long CLAUDE.md
+        continue-on-error: true
+        run: |
+          uv tool install --force "claude-code-telegram @ git+https://github.com/actualize-ace/claude-code-telegram@ace-v1.2"
+          $py = Join-Path $env:APPDATA "uv\tools\claude-code-telegram\Scripts\python.exe"
+          & $py -c "import claude_agent_sdk; print('claude-agent-sdk', claude_agent_sdk.__version__)"
+          & $py scripts/long_prompt_probe.py
+
+      - name: ace-v1.3 (this commit), the Step H install, then the long CLAUDE.md
+        run: |
+          uv tool install --force "claude-code-telegram @ git+https://github.com/actualize-ace/claude-code-telegram@${{ github.sha }}"
+          uv tool list
+          $py = Join-Path $env:APPDATA "uv\tools\claude-code-telegram\Scripts\python.exe"
+          & $py -c "import claude_agent_sdk; print('claude-agent-sdk', claude_agent_sdk.__version__)"
+          $src = & $py -c "import importlib.util; print(importlib.util.find_spec('src.claude.sdk_integration').origin)"
+          $n = (Select-String -Path $src -Pattern "max_buffer_size" -AllMatches).Matches.Count
+          "max_buffer_size count: $n"
+          if ($n -ne 1) { throw "max_buffer_size appears $n times" }
+          $out = & $py scripts/long_prompt_probe.py
+          $out
+          if (-not ($out -match "PROMPT AS FILE: True")) { throw "prompt not passed as a file" }
+          if ($out -match "not found") { throw "CLI did not start" }
