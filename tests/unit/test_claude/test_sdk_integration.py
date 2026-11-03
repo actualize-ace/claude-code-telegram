@@ -561,8 +561,51 @@ class TestClaudeSandboxSettings:
 
         assert len(captured_options) == 1
         opts = captured_options[0]
-        assert str(tmp_path) in opts.system_prompt
-        assert "relative paths" in opts.system_prompt.lower()
+        assert opts.system_prompt["type"] == "file"
+        prompt_text = Path(opts.system_prompt["path"]).read_text(encoding="utf-8")
+        assert str(tmp_path) in prompt_text
+        assert "relative paths" in prompt_text.lower()
+
+    async def test_long_claude_md_stays_off_the_command_line(
+        self, sdk_manager, tmp_path
+    ):
+        """A CLAUDE.md past Windows' 32,767-character command limit must not
+        reach the command line, or every message fails with "Claude Code not
+        found" (Marc Cooper's office desktop, 2026-10-29)."""
+        from claude_agent_sdk._internal.transport.subprocess_cli import (
+            SubprocessCLITransport,
+        )
+
+        marker = "LONG-CLAUDE-MD-MARKER"
+        (tmp_path / "CLAUDE.md").write_text(
+            marker + "\n" + ("x" * 40_000), encoding="utf-8"
+        )
+        captured_options = []
+        mock_factory = _mock_client_factory(
+            _make_assistant_message("Test response"),
+            _make_result_message(total_cost_usd=0.01),
+            capture_options=captured_options,
+        )
+
+        with patch(
+            "src.claude.sdk_integration.ClaudeSDKClient", side_effect=mock_factory
+        ):
+            await sdk_manager.execute_command(
+                prompt="Test prompt",
+                working_directory=tmp_path,
+            )
+
+        opts = captured_options[0]
+        prompt_text = Path(opts.system_prompt["path"]).read_text(encoding="utf-8")
+        assert marker in prompt_text
+
+        opts.cli_path = "claude"
+        cmd = SubprocessCLITransport(
+            prompt="Test prompt", options=opts
+        )._build_command()
+        assert "--system-prompt-file" in cmd
+        assert not any(marker in part for part in cmd)
+        assert len(" ".join(cmd)) < 32_767
 
     async def test_disallowed_tools_passed_to_options(self, tmp_path):
         """Test that disallowed_tools from config are passed to ClaudeAgentOptions."""
@@ -1166,8 +1209,9 @@ class TestClaudeMdLoading:
             await sdk_manager.execute_command(prompt="test", working_directory=tmp_path)
 
         opts = captured[0]
-        assert "# Project Rules" in opts.system_prompt
-        assert "Always use type hints." in opts.system_prompt
+        prompt_text = Path(opts.system_prompt["path"]).read_text(encoding="utf-8")
+        assert "# Project Rules" in prompt_text
+        assert "Always use type hints." in prompt_text
 
     async def test_system_prompt_unchanged_without_claude_md(
         self, sdk_manager, tmp_path
@@ -1186,8 +1230,9 @@ class TestClaudeMdLoading:
             await sdk_manager.execute_command(prompt="test", working_directory=tmp_path)
 
         opts = captured[0]
-        assert "Use relative paths." in opts.system_prompt
-        assert "# Project Rules" not in opts.system_prompt
+        prompt_text = Path(opts.system_prompt["path"]).read_text(encoding="utf-8")
+        assert "Use relative paths." in prompt_text
+        assert "# Project Rules" not in prompt_text
 
     async def test_setting_sources_includes_project(self, sdk_manager, tmp_path):
         """setting_sources=['project'] is passed to ClaudeAgentOptions."""

@@ -1,7 +1,9 @@
 """Claude Code Python SDK integration."""
 
 import asyncio
+import hashlib
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Union
@@ -238,6 +240,23 @@ def _make_can_use_tool_callback(
     return can_use_tool
 
 
+def _write_system_prompt_file(prompt: str) -> Path:
+    """Write the system prompt to a content-addressed file and return its path.
+
+    Same prompt, same file, so concurrent sessions never race on a write; the
+    replace is atomic so a reader never sees a half-written prompt.
+    """
+    prompt_dir = Path(tempfile.gettempdir()) / "ace-telegram"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    path = prompt_dir / f"system-prompt-{digest}.md"
+    if not path.exists():
+        tmp = prompt_dir / f".system-prompt-{digest}.{os.getpid()}.tmp"
+        tmp.write_text(prompt, encoding="utf-8")
+        os.replace(tmp, path)
+    return path
+
+
 class ClaudeSDKManager:
     """Manage Claude Code SDK integration."""
 
@@ -308,6 +327,10 @@ class ClaudeSDKManager:
                     "Loaded CLAUDE.md into system prompt",
                     path=str(claude_md_path),
                 )
+            # Passed as a file, never inline: a long CLAUDE.md on the command
+            # line passes Windows' 32,767-character limit and the CLI fails
+            # to start ("Claude Code not found").
+            system_prompt_file = _write_system_prompt_file(base_prompt)
 
             # When DISABLE_TOOL_VALIDATION=true, pass None for allowed/disallowed
             # tools so the SDK does not restrict tool usage (e.g. MCP tools).
@@ -333,7 +356,7 @@ class ClaudeSDKManager:
                     "autoAllowBashIfSandboxed": True,
                     "excludedCommands": self.config.sandbox_excluded_commands or [],
                 },
-                system_prompt=base_prompt,
+                system_prompt={"type": "file", "path": str(system_prompt_file)},
                 setting_sources=["project"],
                 # Lets full-size phone photos through the SDK's message buffer.
                 max_buffer_size=32 * 1024 * 1024,
